@@ -1,7 +1,7 @@
-# === app.py ===
 import os
 import re
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from datetime import datetime
@@ -9,24 +9,29 @@ from twilio_helpers import send_whatsapp_message
 from send_weekly_reminders import send_weekly_reminders
 import openai
 
+# === Load environment variables ===
 load_dotenv()
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
+# === Initialize clients ===
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 openai.api_key = OPENROUTER_API_KEY
 openai.api_base = "https://openrouter.ai/api/v1"
 
+# === Flask app setup ===
 app = Flask(__name__)
+CORS(app)  # 👈 Enables cross-origin requests from Lovable
 
+# === Expected monthly contributions ===
 EXPECTED_CONTRIBUTIONS = {
     "welfare": 500,
     "emergency": 1000,
     "savings": 1500
 }
+
+# === Helper functions ===
 
 def classify_user(phone):
     res = supabase.table("admins").select("*").eq("phone", phone).execute()
@@ -57,7 +62,6 @@ Name: {summary['name'] if summary else 'Unknown'}
 Total Paid: KES {summary['total_paid'] if summary else 0}
 Months Paid: {', '.join(summary['months_paid']) if summary else 'None'}
 """
-
     try:
         response = openai.ChatCompletion.create(
             model="deepseek-chat",
@@ -116,7 +120,10 @@ def handle_balance(phone):
     member = res.data[0]
     period = datetime.now().strftime("%B %Y")
 
-    contribs = supabase.table("contributions").select("amount, category").eq("member_id", member["id"]).eq("period", period).execute()
+    contribs = supabase.table("contributions") \
+        .select("amount, category") \
+        .eq("member_id", member["id"]) \
+        .eq("period", period).execute()
 
     totals = {}
     for c in contribs.data:
@@ -133,6 +140,8 @@ def handle_balance(phone):
             lines.append(f"⚠️ {cat.title()}: You owe KES {int(balance)} (Paid: {int(paid)})")
 
     return f"📊 *Your balance for {period}:*\n" + "\n".join(lines)
+
+# === Webhook endpoint ===
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -156,12 +165,15 @@ def webhook():
 
     return jsonify({"reply": reply})
 
+# === Trigger reminder manually ===
+
 @app.route("/send-reminders", methods=["POST"])
 def trigger_reminders():
     send_weekly_reminders()
     return jsonify({"status": "success", "message": "Reminders sent."})
 
+# === Run the app ===
+
 if __name__ == "__main__":
     print("✅ Chama Bot is running...")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
