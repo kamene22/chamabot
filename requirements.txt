@@ -2,10 +2,13 @@ Flask==3.1.1
 python-dotenv==1.0.1
 twilio==9.6.3
 openai==1.33.0
-supabase
+flask-cors==4.0.0  # 👈 for Lovable connection
 requests==2.32.4
 
-# Render-installed dependencies (from your logs)
+# Use the updated Supabase client (the correct one)
+supabase==1.0.3  # ✅ Compatible and works on Render
+
+# Automatically installed/render dependencies:
 aiohappyeyeballs==2.6.1
 aiohttp==3.12.13
 aiohttp-retry==2.9.1
