@@ -1,7 +1,8 @@
+# === app.py ===
 import os
 import re
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS  # ✅ For Lovable & CORS support
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from datetime import datetime
@@ -11,28 +12,28 @@ import openai
 
 # === Load environment variables ===
 load_dotenv()
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# === Initialize clients ===
+# === Supabase and OpenAI Setup ===
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 openai.api_key = OPENROUTER_API_KEY
 openai.api_base = "https://openrouter.ai/api/v1"
 
-# === Flask app setup ===
+# === Flask App Setup ===
 app = Flask(__name__)
-CORS(app)  # 👈 Enables cross-origin requests from Lovable
+CORS(app)  # ✅ Enable CORS for Lovable to connect
 
-# === Expected monthly contributions ===
+# === Expected Contributions ===
 EXPECTED_CONTRIBUTIONS = {
     "welfare": 500,
     "emergency": 1000,
     "savings": 1500
 }
 
-# === Helper functions ===
-
+# === Helper Functions ===
 def classify_user(phone):
     res = supabase.table("admins").select("*").eq("phone", phone).execute()
     return "admin" if res.data else "member"
@@ -41,12 +42,10 @@ def fetch_user_summary(phone):
     res = supabase.table("members").select("*").eq("phone", phone).execute()
     if not res.data:
         return None, None
-
     member = res.data[0]
     contribs = supabase.table("contributions").select("*").eq("member_id", member["id"]).execute().data
     total_paid = sum(c["amount"] for c in contribs)
     months_paid = list(set(c["period"] for c in contribs))
-
     return member, {
         "name": member["name"],
         "total_paid": total_paid,
@@ -80,25 +79,22 @@ def extract_contribution_data(msg):
         return float(match.group(1)), match.group(2) if match.group(2) else "general"
     return None, None
 
+# === Handlers ===
 def handle_contribution(phone, message):
     amount, category = extract_contribution_data(message)
     if not amount:
         return "⚠️ I couldn't understand that. Try: 'I paid 500 for welfare'."
-
     res = supabase.table("members").select("*").eq("phone", phone).execute()
     if not res.data:
         return "⚠️ You're not registered. Please send your full name."
-
     member = res.data[0]
     period = datetime.now().strftime("%B %Y")
-
     supabase.table("contributions").insert({
         "member_id": member["id"],
         "amount": amount,
         "period": period,
         "category": category
     }).execute()
-
     return f"✅ Got KES {int(amount)} for {category}. Thanks {member['name']}!"
 
 def handle_message(phone, message):
@@ -116,20 +112,13 @@ def handle_balance(phone):
     res = supabase.table("members").select("*").eq("phone", phone).execute()
     if not res.data:
         return "⚠️ You're not registered."
-
     member = res.data[0]
     period = datetime.now().strftime("%B %Y")
-
-    contribs = supabase.table("contributions") \
-        .select("amount, category") \
-        .eq("member_id", member["id"]) \
-        .eq("period", period).execute()
-
+    contribs = supabase.table("contributions").select("amount, category").eq("member_id", member["id"]).eq("period", period).execute()
     totals = {}
     for c in contribs.data:
         cat = c["category"] if c["category"] else "general"
         totals[cat] = totals.get(cat, 0) + float(c["amount"])
-
     lines = []
     for cat, expected in EXPECTED_CONTRIBUTIONS.items():
         paid = totals.get(cat, 0)
@@ -138,22 +127,17 @@ def handle_balance(phone):
             lines.append(f"✅ {cat.title()}: Fully paid (KES {int(paid)})")
         else:
             lines.append(f"⚠️ {cat.title()}: You owe KES {int(balance)} (Paid: {int(paid)})")
-
     return f"📊 *Your balance for {period}:*\n" + "\n".join(lines)
 
-# === Webhook endpoint ===
-
+# === Webhook Route for Lovable ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
     message = data.get("message", "").strip()
     phone = data.get("phone") or data.get("from")
-
     if not message or not phone:
         return jsonify({"reply": "⚠️ Invalid message format"}), 400
-
     lower_msg = message.lower()
-
     if re.search(r"\bpaid\b|\bsent\b|\btuma\b|\bi have paid\b", lower_msg):
         reply = handle_contribution(phone, message)
     elif re.search(r"\bbalance\b|\bowe\b|\bhave i paid\b|nimeshalipa", lower_msg):
@@ -162,18 +146,15 @@ def webhook():
         reply = ask_deepseek(message, phone)
     else:
         reply = handle_message(phone, message)
-
     return jsonify({"reply": reply})
 
-# === Trigger reminder manually ===
-
+# === Trigger Weekly Reminders (optional) ===
 @app.route("/send-reminders", methods=["POST"])
 def trigger_reminders():
     send_weekly_reminders()
     return jsonify({"status": "success", "message": "Reminders sent."})
 
-# === Run the app ===
-
+# === Start Server ===
 if __name__ == "__main__":
     print("✅ Chama Bot is running...")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
