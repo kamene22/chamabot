@@ -2,7 +2,7 @@ Flask==3.1.1
 python-dotenv==1.0.1
 twilio==9.6.3
 openai==1.33.0
-supabase-py==2.0.3
+supabase
 requests==2.32.4
 
 # Render-installed dependencies (from your logs)
