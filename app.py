@@ -1,8 +1,7 @@
-# === app.py ===
 import os
 import re
 from flask import Flask, request, jsonify
-from flask_cors import CORS  # ✅ For Lovable & CORS support
+from flask_cors import CORS
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from datetime import datetime
@@ -129,15 +128,32 @@ def handle_balance(phone):
             lines.append(f"⚠️ {cat.title()}: You owe KES {int(balance)} (Paid: {int(paid)})")
     return f"📊 *Your balance for {period}:*\n" + "\n".join(lines)
 
-# === Webhook Route for Lovable ===
+# === Webhook Route for Lovable (supports name + phone) ===
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    message = data.get("message", "").strip()
+
+    name = data.get("name", "").strip().title()
     phone = data.get("phone") or data.get("from")
-    if not message or not phone:
-        return jsonify({"reply": "⚠️ Invalid message format"}), 400
+    message = data.get("message", "").strip()
+
+    if not phone:
+        return jsonify({"reply": "⚠️ Missing phone number."}), 400
+
+    # Register if name is provided
+    if name:
+        res = supabase.table("members").select("*").eq("phone", phone).execute()
+        if not res.data:
+            supabase.table("members").insert({"name": name, "phone": phone}).execute()
+            return jsonify({"reply": f"🎉 {name}, you’ve been registered!"})
+        else:
+            return jsonify({"reply": f"✅ You're already registered, {res.data[0]['name']}!"})
+
+    if not message:
+        return jsonify({"reply": "⚠️ Please provide a message or name."}), 400
+
     lower_msg = message.lower()
+
     if re.search(r"\bpaid\b|\bsent\b|\btuma\b|\bi have paid\b", lower_msg):
         reply = handle_contribution(phone, message)
     elif re.search(r"\bbalance\b|\bowe\b|\bhave i paid\b|nimeshalipa", lower_msg):
@@ -146,6 +162,7 @@ def webhook():
         reply = ask_deepseek(message, phone)
     else:
         reply = handle_message(phone, message)
+
     return jsonify({"reply": reply})
 
 # === Trigger Weekly Reminders (optional) ===
