@@ -16,7 +16,6 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
-# === Supabase and OpenAI Setup ===
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 openai.api_key = OPENROUTER_API_KEY
 openai.api_base = "https://openrouter.ai/api/v1"
@@ -25,6 +24,7 @@ openai.api_base = "https://openrouter.ai/api/v1"
 app = Flask(__name__)
 CORS(app)
 
+# === Constants ===
 EXPECTED_CONTRIBUTIONS = {
     "welfare": 500,
     "emergency": 1000,
@@ -49,36 +49,37 @@ def fetch_user_summary(phone):
         "name": member["name"],
         "total_paid": total_paid,
         "months_paid": months_paid,
-        "contributions": contribs
+        "records": contribs
     }
 
 def ask_deepseek(message, phone):
     member, summary = fetch_user_summary(phone)
     role = classify_user(phone)
-    if not summary:
-        return "⚠️ You're not registered."
 
-    # Build a structured history the AI can reason over
-    contrib_lines = [
-        f"{c['period']} - {c['category']}: {c['amount']}"
-        for c in summary["contributions"]
+    history = [
+        {"role": "system", "content": f"""
+You are a helpful assistant for a savings group (Chama).
+This user is a {role}.
+Name: {summary['name'] if summary else 'Unknown'}
+Total Paid: {summary['total_paid']} KES
+Months Paid: {', '.join(summary['months_paid']) if summary else 'None'}
+"""},
+        {"role": "user", "content": message}
     ]
-    contrib_history = "\n".join(contrib_lines)
 
-    context = f"""
-You are a helpful Chama bot assistant. This user is a {role}.
-Name: {summary['name']}
-Total Paid: KES {summary['total_paid']}
-Contribution History:\n{contrib_history}
-"""
+    if summary:
+        # Include past contributions in the context for smarter answers
+        records = summary["records"]
+        history.insert(1, {
+            "role": "system",
+            "content": f"Here are the user’s past payments:\n" +
+                       "\n".join([f"- {r['period']} ({r['category']}): KES {int(r['amount'])}" for r in records])
+        })
 
     try:
         response = openai.ChatCompletion.create(
             model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": context},
-                {"role": "user", "content": message}
-            ]
+            messages=history
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -90,56 +91,35 @@ def extract_contribution_data(msg):
         return float(match.group(1)), match.group(2) if match.group(2) else "general"
     return None, None
 
-# === Handlers ===
-
 def handle_contribution(phone, message):
     amount, category = extract_contribution_data(message)
     if not amount:
         return "⚠️ I couldn't understand that. Try: 'I paid 500 for welfare'."
-
     res = supabase.table("members").select("*").eq("phone", phone).execute()
     if not res.data:
         return "⚠️ You're not registered. Please send your full name."
-
     member = res.data[0]
     period = datetime.now().strftime("%B %Y")
-
     supabase.table("contributions").insert({
         "member_id": member["id"],
         "amount": amount,
         "period": period,
         "category": category
     }).execute()
-
     return f"✅ Got KES {int(amount)} for {category}. Thanks {member['name']}!"
-
-def handle_message(phone, message):
-    res = supabase.table("members").select("*").eq("phone", phone).execute()
-    if not res.data:
-        if " " in message:
-            name = message.strip().title()
-            supabase.table("members").insert({"name": name, "phone": phone}).execute()
-            return f"🎉 {name}, you’ve been registered!"
-        else:
-            return "👋 Please reply with your full name to join the chama."
-    return f"✅ You're already registered, {res.data[0]['name']}!"
 
 def handle_balance(phone):
     res = supabase.table("members").select("*").eq("phone", phone).execute()
     if not res.data:
         return "⚠️ You're not registered."
-
     member = res.data[0]
     period = datetime.now().strftime("%B %Y")
-
     contribs = supabase.table("contributions").select("amount, category") \
         .eq("member_id", member["id"]).eq("period", period).execute()
-
     totals = {}
     for c in contribs.data:
         cat = c["category"] if c["category"] else "general"
         totals[cat] = totals.get(cat, 0) + float(c["amount"])
-
     lines = []
     for cat, expected in EXPECTED_CONTRIBUTIONS.items():
         paid = totals.get(cat, 0)
@@ -148,7 +128,6 @@ def handle_balance(phone):
             lines.append(f"✅ {cat.title()}: Fully paid (KES {int(paid)})")
         else:
             lines.append(f"⚠️ {cat.title()}: You owe KES {int(balance)} (Paid: {int(paid)})")
-
     return f"📊 *Your balance for {period}:*\n" + "\n".join(lines)
 
 # === Routes ===
@@ -156,23 +135,26 @@ def handle_balance(phone):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-    name = data.get("name", "").strip().title()
     phone = data.get("phone") or data.get("from")
     message = data.get("message", "").strip()
+    name = data.get("name", "").strip().title()
 
     if not phone:
         return jsonify({"reply": "⚠️ Missing phone number."}), 400
 
-    if name:
-        res = supabase.table("members").select("*").eq("phone", phone).execute()
-        if not res.data:
-            supabase.table("members").insert({"name": name, "phone": phone}).execute()
-            return jsonify({"reply": f"🎉 {name}, you’ve been registered!"})
-        else:
-            return jsonify({"reply": f"✅ You're already registered, {res.data[0]['name']}!"})
+    res = supabase.table("members").select("*").eq("phone", phone).execute()
+    is_registered = bool(res.data)
 
+    # 1. Register
+    if not is_registered and name:
+        supabase.table("members").insert({"name": name, "phone": phone}).execute()
+        return jsonify({"reply": f"🎉 {name}, you’ve been registered!"})
+    elif not is_registered:
+        return jsonify({"reply": "👋 Please reply with your full name to join the chama."})
+
+    # 2. Handle message
     if not message:
-        return jsonify({"reply": "⚠️ Please provide a message or name."}), 400
+        return jsonify({"reply": "⚠️ Empty message."})
 
     lower_msg = message.lower()
 
@@ -180,10 +162,8 @@ def webhook():
         reply = handle_contribution(phone, message)
     elif re.search(r"\bbalance\b|\bowe\b|\bhave i paid\b|nimeshalipa", lower_msg):
         reply = handle_balance(phone)
-    elif classify_user(phone) == "admin":
-        reply = ask_deepseek(message, phone)
     else:
-        reply = handle_message(phone, message)
+        reply = ask_deepseek(message, phone)
 
     return jsonify({"reply": reply})
 
@@ -191,8 +171,6 @@ def webhook():
 def trigger_reminders():
     send_weekly_reminders()
     return jsonify({"status": "success", "message": "Reminders sent."})
-
-# === Start Flask App ===
 
 if __name__ == "__main__":
     print("✅ Chama Bot is running...")
