@@ -4,6 +4,7 @@ twilio==9.6.3
 openai==1.33.0
 flask-cors==4.0.0  # 👈 for Lovable connection
 requests==2.32.4
+gunicorn
 
 # Use the updated Supabase client (the correct one)
 supabase==1.0.3  # ✅ Compatible and works on Render
