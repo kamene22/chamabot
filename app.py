@@ -5,26 +5,25 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 from supabase import create_client, Client
-import openai
+from openai import OpenAI
 from twilio_helpers import send_whatsapp_message
 from send_weekly_reminders import send_weekly_reminders
 
-# === Load environment variables ===
+# === Load .env ===
 load_dotenv()
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
+# === Supabase + OpenRouter Setup ===
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-openai.api_key = OPENROUTER_API_KEY
-openai.api_base = "https://openrouter.ai/api/v1"
+client = OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1")
 
-# === Flask App Setup ===
+# === Flask Setup ===
 app = Flask(__name__)
 CORS(app)
 
-# === Constants ===
+# === Contribution Targets ===
 EXPECTED_CONTRIBUTIONS = {
     "welfare": 500,
     "emergency": 1000,
@@ -42,9 +41,11 @@ def fetch_user_summary(phone):
     if not res.data:
         return None, None
     member = res.data[0]
+
     contribs = supabase.table("contributions").select("*").eq("member_id", member["id"]).execute().data
     total_paid = sum(c["amount"] for c in contribs)
     months_paid = list(set(c["period"] for c in contribs))
+
     return member, {
         "name": member["name"],
         "total_paid": total_paid,
@@ -56,30 +57,30 @@ def ask_deepseek(message, phone):
     member, summary = fetch_user_summary(phone)
     role = classify_user(phone)
 
-    history = [
-        {"role": "system", "content": f"""
+    system_context = f"""
 You are a helpful assistant for a savings group (Chama).
 This user is a {role}.
 Name: {summary['name'] if summary else 'Unknown'}
 Total Paid: {summary['total_paid']} KES
 Months Paid: {', '.join(summary['months_paid']) if summary else 'None'}
-"""},
+"""
+
+    chat_messages = [
+        {"role": "system", "content": system_context},
         {"role": "user", "content": message}
     ]
 
     if summary:
-        # Include past contributions in the context for smarter answers
         records = summary["records"]
-        history.insert(1, {
-            "role": "system",
-            "content": f"Here are the user’s past payments:\n" +
-                       "\n".join([f"- {r['period']} ({r['category']}): KES {int(r['amount'])}" for r in records])
-        })
+        record_text = "\n".join(
+            [f"- {r['period']} ({r['category']}): KES {int(r['amount'])}" for r in records]
+        )
+        chat_messages.insert(1, {"role": "system", "content": f"User’s past contributions:\n{record_text}"})
 
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="deepseek-chat",
-            messages=history
+            messages=chat_messages,
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -90,6 +91,8 @@ def extract_contribution_data(msg):
     if match:
         return float(match.group(1)), match.group(2) if match.group(2) else "general"
     return None, None
+
+# === Handlers ===
 
 def handle_contribution(phone, message):
     amount, category = extract_contribution_data(message)
@@ -107,6 +110,17 @@ def handle_contribution(phone, message):
         "category": category
     }).execute()
     return f"✅ Got KES {int(amount)} for {category}. Thanks {member['name']}!"
+
+def handle_message(phone, message):
+    res = supabase.table("members").select("*").eq("phone", phone).execute()
+    if not res.data:
+        if " " in message:
+            name = message.strip().title()
+            supabase.table("members").insert({"name": name, "phone": phone}).execute()
+            return f"🎉 {name}, you’ve been registered!"
+        else:
+            return "👋 Please reply with your full name to join the chama."
+    return None  # Let webhook decide next step
 
 def handle_balance(phone):
     res = supabase.table("members").select("*").eq("phone", phone).execute()
@@ -136,34 +150,38 @@ def handle_balance(phone):
 def webhook():
     data = request.get_json()
     phone = data.get("phone") or data.get("from")
-    message = data.get("message", "").strip()
     name = data.get("name", "").strip().title()
+    message = data.get("message", "").strip()
 
     if not phone:
         return jsonify({"reply": "⚠️ Missing phone number."}), 400
 
-    res = supabase.table("members").select("*").eq("phone", phone).execute()
-    is_registered = bool(res.data)
+    # Register new user
+    if name:
+        res = supabase.table("members").select("*").eq("phone", phone).execute()
+        if not res.data:
+            supabase.table("members").insert({"name": name, "phone": phone}).execute()
+            return jsonify({"reply": f"🎉 {name}, you’ve been registered!"})
 
-    # 1. Register
-    if not is_registered and name:
-        supabase.table("members").insert({"name": name, "phone": phone}).execute()
-        return jsonify({"reply": f"🎉 {name}, you’ve been registered!"})
-    elif not is_registered:
-        return jsonify({"reply": "👋 Please reply with your full name to join the chama."})
-
-    # 2. Handle message
     if not message:
         return jsonify({"reply": "⚠️ Empty message."})
 
     lower_msg = message.lower()
 
+    # Handle intents
     if re.search(r"\bpaid\b|\bsent\b|\btuma\b|\bi have paid\b", lower_msg):
         reply = handle_contribution(phone, message)
     elif re.search(r"\bbalance\b|\bowe\b|\bhave i paid\b|nimeshalipa", lower_msg):
         reply = handle_balance(phone)
-    else:
+    elif classify_user(phone) == "admin":
         reply = ask_deepseek(message, phone)
+    else:
+        # Try to register or respond normally
+        fallback = handle_message(phone, message)
+        if fallback:
+            reply = fallback
+        else:
+            reply = ask_deepseek(message, phone)
 
     return jsonify({"reply": reply})
 
@@ -172,6 +190,8 @@ def trigger_reminders():
     send_weekly_reminders()
     return jsonify({"status": "success", "message": "Reminders sent."})
 
+# === Server Run ===
+
 if __name__ == "__main__":
-    print("✅ Chama Bot is running...")
+    print("✅ ChamaBot backend is running...")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
