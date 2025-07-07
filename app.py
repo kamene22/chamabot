@@ -1,13 +1,13 @@
 import os
 import re
+from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from datetime import datetime
+import openai
 from twilio_helpers import send_whatsapp_message
 from send_weekly_reminders import send_weekly_reminders
-import openai
 
 # === Load environment variables ===
 load_dotenv()
@@ -23,9 +23,9 @@ openai.api_base = "https://openrouter.ai/api/v1"
 
 # === Flask App Setup ===
 app = Flask(__name__)
-CORS(app)  # ✅ Enable CORS for Lovable to connect
+CORS(app)  # ✅ Allow requests from Lovable frontend
 
-# === Expected Contributions ===
+# === Constants ===
 EXPECTED_CONTRIBUTIONS = {
     "welfare": 500,
     "emergency": 1000,
@@ -33,6 +33,7 @@ EXPECTED_CONTRIBUTIONS = {
 }
 
 # === Helper Functions ===
+
 def classify_user(phone):
     res = supabase.table("admins").select("*").eq("phone", phone).execute()
     return "admin" if res.data else "member"
@@ -79,6 +80,7 @@ def extract_contribution_data(msg):
     return None, None
 
 # === Handlers ===
+
 def handle_contribution(phone, message):
     amount, category = extract_contribution_data(message)
     if not amount:
@@ -113,7 +115,8 @@ def handle_balance(phone):
         return "⚠️ You're not registered."
     member = res.data[0]
     period = datetime.now().strftime("%B %Y")
-    contribs = supabase.table("contributions").select("amount, category").eq("member_id", member["id"]).eq("period", period).execute()
+    contribs = supabase.table("contributions").select("amount, category") \
+        .eq("member_id", member["id"]).eq("period", period).execute()
     totals = {}
     for c in contribs.data:
         cat = c["category"] if c["category"] else "general"
@@ -128,11 +131,11 @@ def handle_balance(phone):
             lines.append(f"⚠️ {cat.title()}: You owe KES {int(balance)} (Paid: {int(paid)})")
     return f"📊 *Your balance for {period}:*\n" + "\n".join(lines)
 
-# === Webhook Route for Lovable (supports name + phone) ===
+# === Routes ===
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-
     name = data.get("name", "").strip().title()
     phone = data.get("phone") or data.get("from")
     message = data.get("message", "").strip()
@@ -140,7 +143,6 @@ def webhook():
     if not phone:
         return jsonify({"reply": "⚠️ Missing phone number."}), 400
 
-    # Register if name is provided
     if name:
         res = supabase.table("members").select("*").eq("phone", phone).execute()
         if not res.data:
@@ -165,13 +167,13 @@ def webhook():
 
     return jsonify({"reply": reply})
 
-# === Trigger Weekly Reminders (optional) ===
 @app.route("/send-reminders", methods=["POST"])
 def trigger_reminders():
     send_weekly_reminders()
     return jsonify({"status": "success", "message": "Reminders sent."})
 
-# === Start Server ===
+# === Run Server ===
+
 if __name__ == "__main__":
     print("✅ Chama Bot is running...")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))  # ✅ Works on Render
